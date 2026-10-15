@@ -51,6 +51,67 @@ RSpec.describe Libdeflate::Compressor do
       end
     end
 
+    context 'when the input is large' do
+      let(:input) { Array.new(20_000) { |i| "<div class=\"r#{i % 97}\">result #{i}</div>" }.join.b }
+
+      it 'round-trips through zlib in every format' do
+        require 'zlib'
+
+        expect(Zlib::Inflate.new(-Zlib::MAX_WBITS).inflate(compressor.compress(input))).to eq(input)
+        expect(Zlib::Inflate.inflate(compressor.compress(input, Libdeflate::ZLIB))).to eq(input)
+        expect(Zlib.gunzip(compressor.compress(input, Libdeflate::GZIP))).to eq(input)
+      end
+
+      it 'writes the result to a short outbuf' do
+        outbuf = 'bar'.b
+
+        expect(compressor.compress(input, Libdeflate::GZIP, outbuf)).to equal(outbuf)
+        expect(Zlib.gunzip(outbuf)).to eq(input)
+      end
+
+      it 'leaves the input string unfrozen and unchanged' do
+        copy = input.dup
+        compressor.compress(input)
+
+        expect(input).not_to be_frozen
+        expect(input).to eq(copy)
+      end
+
+      it 'lets other threads run while it compresses' do
+        big = input * 64
+        ticks = []
+        stop = false
+        ticker = Thread.new { ticks << Process.clock_gettime(Process::CLOCK_MONOTONIC) until stop }
+        Thread.pass while ticks.empty?
+
+        started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        compressor.compress(big, Libdeflate::GZIP)
+        finished_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        stop = true
+        ticker.join
+
+        during = ticks.select { |t| t > started_at && t < finished_at }
+        longest_gap = ([started_at] + during + [finished_at]).each_cons(2).map { |a, b| b - a }.max
+
+        expect(longest_gap).to be < (finished_at - started_at) / 2
+      end
+
+      it 'compresses correctly when threads share one compressor' do
+        inputs = Array.new(16) { |i| input + i.to_s }
+        outputs = inputs.map { |s| Thread.new { Array.new(5) { compressor.compress(s, Libdeflate::GZIP) } } }.map(&:value)
+
+        outputs.each_with_index do |results, i|
+          results.each { |gz| expect(Zlib.gunzip(gz)).to eq(inputs[i]) }
+        end
+      end
+    end
+
+    context 'when the compressor is not initialized' do
+      it 'raises an error' do
+        expect { described_class.allocate.compress('foo') }.to raise_error(Libdeflate::Error)
+      end
+    end
+
     context 'when outbuf is frozen' do
       it 'raises a RuntimeError' do
         expect { compressor.compress('foo', nil, ''.freeze) }.to raise_error(RuntimeError)

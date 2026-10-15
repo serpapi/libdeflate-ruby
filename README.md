@@ -35,6 +35,10 @@ decompressor = Libdeflate::Decompressor.new
 decompressor.decompress(compressed_string)
 ```
 
+`Compressor#compress` releases the GVL for strings of 16 KiB or more, so other
+Ruby threads keep running while it compresses. A compressor can be shared by
+threads; calls on it run one at a time.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
