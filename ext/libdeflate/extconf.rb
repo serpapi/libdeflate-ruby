@@ -11,7 +11,7 @@ else
   # itself: no cmake, no download at install time. Each ld_*.c includes one
   # library source so object names stay unique (arm/ and x86/ both have
   # cpu_features.c).
-  $INCFLAGS << " -I$(srcdir)/libdeflate"
+  $INCFLAGS << ' -I$(srcdir)/libdeflate'
   $srcs = ['libdeflate_ext.c'] + Dir.glob(File.join(__dir__, 'ld_*.c')).map { |f| File.basename(f) }.sort
 end
 
