@@ -18,6 +18,11 @@ Or install it yourself as:
 
     $ gem install libdeflate
 
+The gem compiles the bundled libdeflate (see `ext/libdeflate/libdeflate/VERSION`)
+with a C compiler only: no cmake, no download. To link a system libdeflate instead:
+
+    $ gem install libdeflate -- --use-system-libraries
+
 ## Usage
 
 ```ruby
