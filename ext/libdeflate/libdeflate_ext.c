@@ -93,14 +93,8 @@ rb_libdeflate_crc32(int argc, VALUE *argv, VALUE self)
 
 struct compressor {
     struct libdeflate_compressor *c;
-    VALUE mutex;
+    int level;
 };
-
-static void
-compressor_mark(void *ptr)
-{
-    rb_gc_mark(((struct compressor *)ptr)->mutex);
-}
 
 static void
 compressor_free(void *ptr)
@@ -119,7 +113,7 @@ compressor_memsize(const void *ptr)
 
 static const rb_data_type_t compressor_data_type = {
     "compressor",
-    { compressor_mark, compressor_free, compressor_memsize, },
+    { NULL, compressor_free, compressor_memsize, },
     0, 0, RUBY_TYPED_FREE_IMMEDIATELY
 };
 
@@ -127,11 +121,8 @@ static VALUE
 rb_compressor_s_allocate(VALUE klass)
 {
     struct compressor *compressor;
-    VALUE self = TypedData_Make_Struct(klass, struct compressor, &compressor_data_type, compressor);
 
-    compressor->mutex = rb_mutex_new();
-
-    return self;
+    return TypedData_Make_Struct(klass, struct compressor, &compressor_data_type, compressor);
 }
 
 /*
@@ -164,6 +155,7 @@ rb_compressor_initialize(int argc, VALUE *argv, VALUE self)
         libdeflate_free_compressor(compressor->c);
     }
     compressor->c = c;
+    compressor->level = compression_level;
 
     return self;
 }
@@ -181,7 +173,7 @@ check_compressor(VALUE self)
 }
 
 struct compress_args {
-    struct libdeflate_compressor *c;
+    int level;
     size_t (*func)(struct libdeflate_compressor *, const void *, size_t, void *, size_t);
     const void *in;
     size_t in_nbytes;
@@ -190,33 +182,28 @@ struct compress_args {
     size_t result;
 };
 
+/*
+ * Runs without the GVL. The input is a frozen string and the output a string
+ * no other thread has seen, so neither changes meanwhile. It compresses with a
+ * libdeflate compressor of its own rather than locking the shared one: the
+ * lock would stay held until this thread got the GVL back, and every other call
+ * on the compressor would wait for that handoff. The shared one is only used
+ * with the GVL held, which serializes those calls.
+ */
 static void *
 compress_without_gvl(void *ptr)
 {
     struct compress_args *args = ptr;
+    struct libdeflate_compressor *c = libdeflate_alloc_compressor(args->level);
 
-    args->result = args->func(args->c, args->in, args->in_nbytes, args->out, args->out_nbytes_avail);
-
-    return NULL;
-}
-
-/*
- * Runs under the compressor's mutex. The input is a frozen string and the
- * output a string no other thread has seen, so neither changes while the GVL
- * is released.
- */
-static VALUE
-compress_synchronized(VALUE ptr)
-{
-    struct compress_args *args = (struct compress_args *)ptr;
-
-    if (args->in_nbytes >= NOGVL_MIN_BYTES) {
-        rb_thread_call_without_gvl(compress_without_gvl, args, RUBY_UBF_IO, NULL);
-    } else {
-        compress_without_gvl(args);
+    if (c == NULL) {
+        return NULL;
     }
 
-    return Qnil;
+    args->result = args->func(c, args->in, args->in_nbytes, args->out, args->out_nbytes_avail);
+    libdeflate_free_compressor(c);
+
+    return args;
 }
 
 /*
@@ -228,8 +215,8 @@ compress_synchronized(VALUE ptr)
  * resulting compressed data will be written to it.
  *
  * Strings of 16 KiB or more are compressed without holding the GVL, so other
- * threads keep running. Calls on one compressor from several threads run one
- * at a time.
+ * threads keep running, and threads sharing a compressor compress them in
+ * parallel.
  *
  *    compressor.compress('foo')                   #=> "\x01\x03\x00\xFC\xFFfoo"
  *    compressor.compress('foo', Libdeflate::ZLIB) #=> "x\x9C\x01\x03\x00\xFC\xFFfoo\x02\x82\x01E"
@@ -277,14 +264,18 @@ rb_compressor_compress(int argc, VALUE *argv, VALUE self)
     /* A bound-sized buffer cannot run out of space, so there is no retry. */
     out = rb_str_buf_new(compress_bound_func(compressor->c, RSTRING_LEN(in)));
 
-    args.c = compressor->c;
+    args.level = compressor->level;
     args.in = RSTRING_PTR(in);
     args.in_nbytes = RSTRING_LEN(in);
     args.out = RSTRING_PTR(out);
     args.out_nbytes_avail = rb_str_capacity(out);
     args.result = 0;
 
-    rb_mutex_synchronize(compressor->mutex, compress_synchronized, (VALUE)&args);
+    if (args.in_nbytes < NOGVL_MIN_BYTES) {
+        args.result = args.func(compressor->c, args.in, args.in_nbytes, args.out, args.out_nbytes_avail);
+    } else if (rb_thread_call_without_gvl(compress_without_gvl, &args, RUBY_UBF_IO, NULL) == NULL) {
+        rb_raise(rb_eLibdefalteError, "libdeflate_alloc_compressor: compression_level=%d", args.level);
+    }
     RB_GC_GUARD(in);
 
     if (args.result == 0) {

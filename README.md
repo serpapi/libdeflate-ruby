@@ -37,7 +37,7 @@ decompressor.decompress(compressed_string)
 
 `Compressor#compress` releases the GVL for strings of 16 KiB or more, so other
 Ruby threads keep running while it compresses. A compressor can be shared by
-threads; calls on it run one at a time.
+threads, and they compress such strings in parallel.
 
 ## Development
 

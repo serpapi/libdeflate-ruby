@@ -104,6 +104,34 @@ RSpec.describe Libdeflate::Compressor do
           results.each { |gz| expect(Zlib.gunzip(gz)).to eq(inputs[i]) }
         end
       end
+
+      it 'keeps threads sharing a compressor as fast as threads with their own while other threads hold the GVL' do
+        big = input * 2
+        stop = false
+        busy = Array.new(2) { Thread.new { nil until stop } }
+        begin
+          compressors = Array.new(16) { |i| i.even? ? compressor : described_class.new }
+          walls = compressors.map do |c|
+            Thread.new do
+              started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              c.compress(big)
+              Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+            end
+          end.map(&:value)
+        ensure
+          stop = true
+          busy.each(&:join)
+        end
+        shared, own = walls.each_slice(2).to_a.transpose.map(&:sort)
+        ms = ->(times) { times.map { |t| (t * 1000).round } }
+
+        # own[6] leaves out the slowest thread with its own compressor: on Ruby 2.7 one can miss a GVL handoff.
+        expect(shared[4]).to be < own[6] * 2, "shared: #{ms.call(shared)} ms, own: #{ms.call(own)} ms"
+      end
+
+      it 'compresses at the level the compressor was created with' do
+        expect(described_class.new(1).compress(input).bytesize).to be > described_class.new(12).compress(input).bytesize
+      end
     end
 
     context 'when the compressor is not initialized' do
